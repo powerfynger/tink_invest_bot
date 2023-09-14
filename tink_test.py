@@ -31,6 +31,7 @@ import telebot
 import os
 from dotenv import load_dotenv, find_dotenv 
 
+from time import sleep
 
 pd.set_option('display.max_rows', 500)
 pd.set_option('display.max_columns', 500)
@@ -67,19 +68,22 @@ bot = telebot.TeleBot(TOKEN_TELEBOT)
 Вопрос с хранением открытых позиций (возможно получится получать через апи, в таком случае и объекты для добавления при покупке изменяться)
 Вопрос частоты проверки сделок по купленным активам.
 
+Добавить проверку на разницу в цене.
+
 На данном этапе запоминаем по количеству и наименованию актива большой сделки.
 """
 TESTSUM_FILENAME = "money.txt"
-MIN_TOTAL_MONEY_BUY = 5000000
+MIN_TOTAL_MONEY_BUY = 3000000.0
 
 my_open_positions = []
-test_sum = -1
+# test_sum = -1
 
 
 def get_sum():
     try:
-        with open(TESTSUM_FILENAME, 'r+') as file:
+        with open(TESTSUM_FILENAME, 'r') as file:
             test_sum =  float(file.readline().strip())
+            return test_sum
     except Exception as e:
         print(e)
 
@@ -88,21 +92,21 @@ def get_sum():
 def update_sum(value):
     try:
         # Открываем файл для чтения и записи
-        with open(TESTSUM_FILENAME, 'r+') as file:
+        with open(TESTSUM_FILENAME, 'w') as file:
             # Захватываем блокировку
-            with lock:
-                # Считываем первую строку и преобразуем её в int
-                current_sum = float(file.readline().strip())
+            # with lock:
+            # Считываем первую строку и преобразуем её в int
+            # current_sum = float(file.readline().strip())
 
-                # Меняем значение на новое
-                current_sum += value
+            # Меняем значение на новое
+            # current_sum = value
 
-                # Перемещаем указатель файла в начало
-                file.seek(0)
+            # Перемещаем указатель файла в начало
+            file.seek(0)
 
-                # Перезаписываем новое значение в файл
-                file.write(str(current_sum))
-                file.truncate()
+            # Перезаписываем новое значение в файл
+            file.write(str(value))
+            # file.truncate()
 
     except Exception as e:
         print(e)
@@ -226,26 +230,26 @@ def check_unusual(trade):
         big_trades.append(trade)
         if len(big_trades) >= 250:
             big_trades.pop()
+        notification = str(get_ticker(trade['figi'][0])) + '\n' + str(trade['total_money'][0]) + ' RUB\n'
         # notification += (lambda x: '\nПродажа' if x == 2 else '\nПокупка')(trade['direction'][0])
         if trade['direction'][0] == 1:
             check_to_buy(trade)
-            notification = str(get_ticker(trade['figi'][0])) + '\n' + str(trade['total_money'][0]) + ' RUB\n'
             notification += "Покупка " + "по "+str(trade['price'][0])+ " RUB\n"
             open_positions.append(trade)
         else:
             check_to_sell(trade)
-            notification = str(get_ticker(trade['figi'][0])) + '\n' + str(trade['total_money'][0]) + ' RUB\n'
+            # notification = str(get_ticker(trade['figi'][0])) + '\n' + str(trade['total_money'][0]) + ' RUB\n'
             position = get_position(trade)
             print(position)
             if position is not None:
                 notification += f"Закрытие покупки по {position['price'][0]}, выручка \
 {trade['total_money'][0] - position['total_money'][0]}/\
-{round(float(trade['total_money'][0]) / position['total_money'][0], 3) % 100} %"
+{round(trade['total_money'][0] - position['total_money'][0] / float(position['total_money'][0]), 3) % 100} %"
                 try:
                     open_positions.remove(position)
                 except:
                     pass
-                # print(open_positions)
+                # print(open_positions) 
             else:
                 notification += "Продажа " + "по "+str(trade['price'][0])+ " RUB\n"
         send_notification(notification)
@@ -257,34 +261,36 @@ def check_to_buy(trade):
     цене на макс. возможную сумму, не превышающую 20% от всего капитала. 
     Добавляет в список открытых позиций
     """
+    test_sum = get_sum()
     try:
+        # print("\n\n\n\n")
         if test_sum <= 20000:
             return
-
         if trade['total_money'][0] > MIN_TOTAL_MONEY_BUY:
             quantity = 1
             total_money = 20000
-            while total_money < quantity * trade['price'][0]:
+            while total_money > quantity * trade['price'][0]:
                 quantity += 1
             
             quantity -= 1
             # ИМИТАЦИЯ ПОКУПКИ
             test_sum -= quantity * trade['price'][0] 
-            update_sum(-(quantity * trade['price'][0]))
+            # print(test_sum, trade['price'][0] * quantity)
+            update_sum(test_sum)
             
             notification = f"Произошла покупка {get_ticker(trade['figi'][0])} \n {trade['total_money'][0]} RUB\n\
 По {trade['price'][0]}\nБаланс:{test_sum}"
-        send_notification(notification, is_silent=False)
+            send_notification(notification, is_silent=False)
 
-        my_open_positions.append({
-            'total_sum' : quantity * trade['price'][0],
-            'quantity': quantity,
-            'price' : price, 
-            'quantity_big' : trade['quantity'][0],
-            'figi' : trade['figi'][0]
-            })
-    except:
-        pass
+            my_open_positions.append({
+                'total_sum' : quantity * trade['price'][0],
+                'quantity': quantity,
+                'price' : trade['price'][0], 
+                'quantity_big' : trade['quantity'][0],
+                'figi' : trade['figi'][0]
+                })
+    except Exception as e:
+        print(e)
 
 
 def check_to_sell(trade):
@@ -293,20 +299,23 @@ def check_to_sell(trade):
     Находит купленные активы в открытых сделках и продает про текущей (в тестовом варианте эталонной) цене
     Удаляет из списка открытых позиций
     """
+    test_sum = get_sum()
     try:
         for my_position in my_open_positions:
+            print(my_position)
+            print(trade)
             if my_position['figi'] == trade['figi'][0] and my_position['quantity_big'] == trade['quantity']:
                 # ИМИТАЦИЯ ПРОДАЖИ
                 test_sum += trade['price'][0] * my_position['quantity']
-                
-                update_sum(trade['price'][0] * my_position['quantity'])
+                # print(test_sum, trade['price'][0] * my_position['quantity'])
+                update_sum(test_sum)
                 notification = f"Произошла продажа {get_ticker(trade['figi'][0])} \n {trade['total_money'][0]} RUB\n\
     По {trade['price'][0]}\nБаланс:{test_sum}"
                 send_notification(notification, is_silent=False)
 
                 my_open_positions.remove(my_position)
-    except:
-        pass
+    except Exception as e:
+        print(e)
 
     
 
@@ -358,6 +367,10 @@ def send_notification(message, is_silent=True):
 def start_message(message):
     bot.send_message(message.chat.id, f'Онлайн.\n{message.chat.id}')
 
+def check_thread_alive(thr):
+    thr.join(timeout=0.0)
+    return thr.is_alive()
+
 def main():
     print("** Started **\n")
 
@@ -365,7 +378,6 @@ def main():
     with Client(TOKEN_TINKOFF, target=INVEST_GRPC_API) as client:
         # Создание замка для доступа к файлу с тестовой суммой
         money_lock = threading.Lock()
-        test_sum = get_sum()
 
         # Получение данных аккаунта  
         response = client.users.get_accounts()
@@ -384,14 +396,22 @@ def main():
         bot_thread = threading.Thread(target=bot.polling)
         bot_thread.start()
         while True:
+            if not check_thread_alive(bot_thread):
+                bot_thread = threading.Thread(target=bot.polling)
+                bot_thread.start()
             for figi in figis:
-                trades = get_history_trades(client, figi=figi, time_minutes=600)
+                try:
+                    trades = get_history_trades(client, figi=figi, time_minutes=60)
+                except:
+                    sleep(60*2)
+                    send_notification("Нет крупных сделок за послендний час:(", is_silent=False)
                 for trade in trades:
-                    type(trade)
+                    # type(trade)
                     # Если что-то необычное в сделках отправляем уведомление в ТГ
                     processed_trade = process_trade(trade)
                     check_unusual(processed_trade)
-                print("Checked = " + figi)
+                # print("Checked = " + figi)
+            # sleep(60)
                 
 if __name__ == '__main__':
     main()
