@@ -12,14 +12,13 @@ from tinkoff.invest.services import InstrumentsService, MarketDataService
 from tinkoff.invest.utils import quotation_to_decimal
 from tinkoff.invest.constants import INVEST_GRPC_API
 from tinkoff.invest.utils import now
-from tinkoff.invest import Client
-
+from tinkoff.invest import Client, OrderDirection, OrderType
 
 # Необходимо для хранения данных
 import pandas as pd
 
 # Необходимо для расчета периода отслеживания сделок
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 # Возможно переделать для многопоточного обращения к АПИ тинькова
 import threading
@@ -40,12 +39,16 @@ pd.set_option('display.width', 1000)
 # Для подгрузки переменных среды  
 load_dotenv(find_dotenv())
 
+IS_SANDBOX = True
+
 TOKEN_TINKOFF = os.getenv('TOKEN_TINKOFF')
 TOKEN_TELEBOT = os.getenv('TOKEN_TELEBOT')
 
 MY_ID_TELEBOT = '1149967740'
 # Сумма, начиная с которой сделки будут отправлены в ТГ и помечены как крупные
-MIN_TOTAL_MONEY = 7000000
+MIN_TOTAL_MONEY = 5000000
+# Сумма, начиная с которой по крупной сделке будет отправлено уведомление
+MIN_TOTAL_MONEY_NOTIF = 10000000
 
 EXEL_TMP_FILENAME = 'Тестовый_Вывод.xlsx'
 EXEL_TICEKRS_FILENAME = 'tickers.xlsx'
@@ -57,21 +60,74 @@ figi_to_ticker = {}
 big_trades = []
 # Открытые позиции [trade]
 open_positions = []
-
+# Приоритетные тикеры активов для отслеживания (если не пусто, то уведомления будут приходить только по активам из списка)
+priority_tickers = []
 
 bot = telebot.TeleBot(TOKEN_TELEBOT)
 
 #ТЕСТОВЫЙ СЕГМЕНТ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-"""
-Покупает и продает активы по эталонным ценам. Следует решить:
-Вопрос стоит ли ждать эталонной цены или покупать по текущей в реальных сделках.
-Вопрос с хранением открытых позиций (возможно получится получать через апи, в таком случае и объекты для добавления при покупке изменяться)
-Вопрос частоты проверки сделок по купленным активам.
+# r = client.orders.post_order(
+#     order_id=str(datetime.utcnow().timestamp()),
+#     figi=FIGI,
+#     quantity=1,
+#     account_id=creds.account_id_test,
+#     direction=OrderDirection.ORDER_DIRECTION_BUY,
+#     order_type=OrderType.ORDER_TYPE_MARKET
+# )
 
-Добавить проверку на разницу в цене.
+def _post_order(client, figi, quantity, price, direction, account_id, order_type):
+    """Posts order to Tinkoff API
+    Args:
+        figi (str): FIGI of share
+        quantity (int): quantity of share
+        price (schemas.Quotation): price of share
+        direction (schemas.OrderDirection): order direction (SELL or BUY)
+        account_id (str): account ID for order
+        order_type (schemas.OrderType): type of order (MARKET or LIMIT)
 
-На данном этапе запоминаем по количеству и наименованию актива большой сделки.
-"""
+    Returns:
+        schemas.PostOrderResponse: response from Tinkoff API or None
+
+    Если OrderType.ORDER_TYPE_MARKET без указания цены, то купит по текущей рыночной
+    """
+    # order_id=str(datetime.utcnow().timestamp())
+    order_id = uuid.uuid4().hex
+
+    if IS_SANDBOX:
+        response = client.sandbox.post_sandbox_order(
+            figi=figi,
+            quantity=quantity, 
+            direction=direction, 
+            account_id=account_id, 
+            order_type=order_type, 
+            order_id=order_id
+            )
+    else:
+        response = client.orders.post_order(
+            figi=figi, 
+            quantity=quantity, 
+            direction=direction, 
+            account_id=account_id, 
+            order_type=order_type, 
+            order_id=order_id
+            )
+    # _db.put_order_in_db(figi=figi, quantity=quantity, price=_quotation_to_float(response.initial_order_price_pt), direction=int(direction), account_id=account_id, order_type=int(order_type), order_id=order_id, news_id=news_id)
+    return response
+
+def check_sell(trade):
+    """
+    type: (trade) --> None
+    """
+    pass
+
+
+
+def check_buy(trade):
+    """
+    type: (trade) --> None
+    """
+    # if 
+    pass
 
 
 #ТИНЬКОФ СЕГМЕНТ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -204,15 +260,18 @@ def check_unusual(trade):
             if position is not None:
                 notification += f"Закрытие покупки по {position['price'][0]}, выручка \
 {trade['total_money'][0] - position['total_money'][0]}/\
-{round(trade['total_money'][0] - position['total_money'][0] / float(position['total_money'][0]), 3) % 100} %"
+{round((trade['price'][0] - position['price'][0]) / 100.0, 3)} %"
                 try:
                     open_positions.remove(position)
                 except:
                     pass
-                # print(open_positions) 
             else:
                 notification += "Продажа " + "по "+str(trade['price'][0])+ " RUB\n"
-        send_notification(notification)
+        # 500 678
+        if trade['total_money'][0] >= MIN_TOTAL_MONEY_NOTIF:
+            send_notification(notification, is_silent=False)
+        else:
+            send_notification(notification)
  
 
 def get_save_tickers(client):
@@ -263,6 +322,41 @@ def send_notification(message, is_silent=True):
 def start_message(message):
     bot.send_message(message.chat.id, f'Онлайн.\n{message.chat.id}')
 
+@bot.message_handler(commands=['track'])
+def add_track(message):
+    chat_id = message.chat.id
+    if chat_id != MY_ID:
+        return
+    ticker_track = bot.send_message(chat_id, 'Отправьте тикер, который необходимо отслеживать.')
+    bot.register_next_step_handler(ticker_track, sub_add_track)
+
+def sub_add_track(message):
+    chat_id = message.chat.id
+    if chat_id != MY_ID:
+        return
+    if message.text in figi_to_ticker.values():
+        priority_tickers.append(message.text)
+        bot.send_message(chat_id, f'Отслеживаю {message.text}.')
+
+@bot.message_handler(commands=['clear'])
+def add_track(message):
+    chat_id = message.chat.id
+    if chat_id != MY_ID:
+        return
+    priority_tickers.clear()
+
+@bot.message_handler(commands=['list'])
+def add_track(message):
+    chat_id = message.chat.id
+    if chat_id != MY_ID:
+        return
+    msg = "Отслеживается:\n"
+    for priority_ticker in priority_tickers:
+        msg += f"{priority_ticker}\n"
+    bot.send_message(chat_id, msg)
+
+
+
 def check_thread_alive(thr):
     thr.join(timeout=0.0)
     return thr.is_alive()
@@ -272,9 +366,6 @@ def main():
 
 
     with Client(TOKEN_TINKOFF, target=INVEST_GRPC_API) as client:
-        # Создание замка для доступа к файлу с тестовой суммой
-        money_lock = threading.Lock()
-
         # Получение данных аккаунта  
         response = client.users.get_accounts()
         account, *_ = response.accounts
@@ -295,12 +386,17 @@ def main():
             if not check_thread_alive(bot_thread):
                 bot_thread = threading.Thread(target=bot.polling)
                 bot_thread.start()
+            # Если есть приоритетные сделки, список фиги на проверку состоит только из них
+            if not priority_tickers.bool():
+                figis = [get_figi(priority_ticker) for priority_ticker in priority_tickers]
+            else:
+                figis = tickers['figi']
             for figi in figis:
                 try:
                     trades = get_history_trades(client, figi=figi, time_minutes=60)
                 except:
                     sleep(60*2)
-                    send_notification("Нет крупных сделок за послендний час:(", is_silent=False)
+                    send_notification("Нет крупных сделок за послендний час:(", is_silent=True)
                 for trade in trades:
                     # type(trade)
                     # Если что-то необычное в сделках отправляем уведомление в ТГ
