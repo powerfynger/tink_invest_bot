@@ -30,7 +30,12 @@ import telebot
 import os
 from dotenv import load_dotenv, find_dotenv 
 
+# Если нет сделок за указанное время -- спим
 from time import sleep
+
+# Проверка индиктаторов на tradingview
+from tradingview_ta import TA_Handler, Interval, Exchange
+
 
 pd.set_option('display.max_rows', 500)
 pd.set_option('display.max_columns', 500)
@@ -44,7 +49,7 @@ IS_SANDBOX = True
 TOKEN_TINKOFF = os.getenv('TOKEN_TINKOFF')
 TOKEN_TELEBOT = os.getenv('TOKEN_TELEBOT')
 
-MY_ID_TELEBOT = '1149967740'
+MY_ID_TELEBOT = 1149967740
 # Сумма, начиная с которой сделки будут отправлены в ТГ и помечены как крупные
 MIN_TOTAL_MONEY = 5000000
 # Сумма, начиная с которой по крупной сделке будет отправлено уведомление
@@ -64,6 +69,14 @@ open_positions = []
 priority_tickers = []
 
 bot = telebot.TeleBot(TOKEN_TELEBOT)
+
+commands ={
+    'track' : 'Отслеживать актив по тикеру.',
+    'help' : 'Показывает список доступных команд.',
+    'ping' : 'Пинг.',
+    'clear' : 'Очистить отслеживаемые активы.',
+    'list' : 'Список отслеживаемых активов.'
+}
 
 #ТЕСТОВЫЙ СЕГМЕНТ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # r = client.orders.post_order(
@@ -128,6 +141,28 @@ def check_buy(trade):
     """
     # if 
     pass
+
+def check_TA(ticker, interval=Interval.INTERVAL_4_HOURS):
+    analysis = TA_Handler(
+    symbol=ticker,
+    screener="russia",
+    exchange="MOEX",
+    interval=interval,
+    )
+    return analysis.get_analysis().summary['RECOMMENDATION']
+    # if analysis.get_analysis().summary['RECOMMENDATION'] == "BUY":
+    #     return 1
+    # if analysis.get_analysis().summary['RECOMMENDATION'] == "STRONG_BUY":
+    #     return 2
+    # if analysis.get_analysis().summary['RECOMMENDATION'] == "SELL":
+    #     return -1
+    # if analysis.get_analysis().summary['RECOMMENDATION'] == "STRONG_SELL":
+    #     return -2
+    # if analysis.get_analysis().summary['RECOMMENDATION'] == "NEUTRAL":
+    #     return 0
+    # if analysis.get_analysis().summary['RECOMMENDATION'] == "ERROR":
+    #     return None
+
 
 
 #ТИНЬКОФ СЕГМЕНТ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -235,9 +270,7 @@ def check_unusual(trade):
     Проверка, если были был перемещен большой капитал.
     Отправка уведомления в ТГ, если да.
     """
-    # print(trade['total_money'][0], type(trade['total_money']))
     if trade['total_money'][0] > MIN_TOTAL_MONEY:
-        # print(big_trades)
         is_in_list = False
         for big_trade in big_trades:
             if trade.equals(big_trade):
@@ -249,12 +282,10 @@ def check_unusual(trade):
         if len(big_trades) >= 250:
             big_trades.pop()
         notification = str(get_ticker(trade['figi'][0])) + '\n' + str(trade['total_money'][0]) + ' RUB\n'
-        # notification += (lambda x: '\nПродажа' if x == 2 else '\nПокупка')(trade['direction'][0])
         if trade['direction'][0] == 1:
-            notification += "Покупка " + "по "+str(trade['price'][0])+ " RUB\n"
+            notification += f"Покупка по {(trade['price'][0])} RUB\n"
             open_positions.append(trade)
         else:
-            # notification = str(get_ticker(trade['figi'][0])) + '\n' + str(trade['total_money'][0]) + ' RUB\n'
             position = get_position(trade)
             print(position)
             if position is not None:
@@ -266,8 +297,8 @@ def check_unusual(trade):
                 except:
                     pass
             else:
-                notification += "Продажа " + "по "+str(trade['price'][0])+ " RUB\n"
-        # 500 678
+                notification += f"Продажа по {(trade['price'][0])} RUB\n"
+        notification += check_TA(get_ticker(trade['figi'][0]), Interval.INTERVAL_1_HOUR)
         if trade['total_money'][0] >= MIN_TOTAL_MONEY_NOTIF:
             send_notification(notification, is_silent=False)
         else:
@@ -325,35 +356,44 @@ def start_message(message):
 @bot.message_handler(commands=['track'])
 def add_track(message):
     chat_id = message.chat.id
-    if chat_id != MY_ID:
+    if chat_id != MY_ID_TELEBOT:
         return
     ticker_track = bot.send_message(chat_id, 'Отправьте тикер, который необходимо отслеживать.')
     bot.register_next_step_handler(ticker_track, sub_add_track)
 
 def sub_add_track(message):
     chat_id = message.chat.id
-    if chat_id != MY_ID:
+    if chat_id != MY_ID_TELEBOT:
         return
-    if message.text in figi_to_ticker.values():
+    if message.text.upper() in figi_to_ticker.values():
         priority_tickers.append(message.text)
         bot.send_message(chat_id, f'Отслеживаю {message.text}.')
 
 @bot.message_handler(commands=['clear'])
 def add_track(message):
     chat_id = message.chat.id
-    if chat_id != MY_ID:
+    if chat_id != MY_ID_TELEBOT:
         return
     priority_tickers.clear()
+    bot.send_message(chat_id, 'Список очищен.')
 
 @bot.message_handler(commands=['list'])
 def add_track(message):
     chat_id = message.chat.id
-    if chat_id != MY_ID:
+    if chat_id != MY_ID_TELEBOT:
         return
     msg = "Отслеживается:\n"
     for priority_ticker in priority_tickers:
         msg += f"{priority_ticker}\n"
     bot.send_message(chat_id, msg)
+
+@bot.message_handler(commands=['help'])
+def command_help(message):
+    chat_id = message.chat.id
+    bot.reply_to(message, 'Список доступных команд:')
+    for i in commands:
+        bot.send_message(chat_id, f'/{i} - {commands[i]}')
+    return 
 
 
 
@@ -387,7 +427,7 @@ def main():
                 bot_thread = threading.Thread(target=bot.polling)
                 bot_thread.start()
             # Если есть приоритетные сделки, список фиги на проверку состоит только из них
-            if not priority_tickers.bool():
+            if priority_tickers:
                 figis = [get_figi(priority_ticker) for priority_ticker in priority_tickers]
             else:
                 figis = tickers['figi']
