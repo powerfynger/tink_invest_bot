@@ -35,7 +35,10 @@ from time import sleep
 
 # Проверка индиктаторов на tradingview
 from tradingview_ta import TA_Handler, Interval, Exchange
+import uuid
 
+# База данных для хранения подписанных пользователей
+import sqlite3
 
 pd.set_option('display.max_rows', 500)
 pd.set_option('display.max_columns', 500)
@@ -67,6 +70,8 @@ big_trades = []
 open_positions = []
 # Приоритетные тикеры активов для отслеживания (если не пусто, то уведомления будут приходить только по активам из списка)
 priority_tickers = []
+
+users = []
 
 bot = telebot.TeleBot(TOKEN_TELEBOT)
 
@@ -163,7 +168,62 @@ def check_TA(ticker, interval=Interval.INTERVAL_4_HOURS):
     # if analysis.get_analysis().summary['RECOMMENDATION'] == "ERROR":
     #     return None
 
+# СЕГМЕНТ БД~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+def connect_db():
+    # Create a new SQLite database
+    db = sqlite3.connect("users.db")
+    cur = db.cursor()
 
+    # Create a table for the key-value pairs
+    # cur.execute("CREATE TABLE mytable (key INTEGER PRIMARY KEY)")
+    db.execute(""" CREATE TABLE IF NOT EXISTS users (
+                          user_id INTEGER PRIMARY KEY,
+            );""")
+
+    # Commit changes and close the database
+    db.commit()
+    db.close()
+
+def insert_data(user_id):
+    # Open the database
+    db = sqlite3.connect("users.db")
+    cur = db.cursor()
+
+    # Insert the data into the table
+    cur.execute("INSERT INTO mytable (user_id) VALUES (?)", (user_id))
+
+    # Commit changes and close the database
+    db.commit()
+    db.close()
+
+def retrieve_data(user_id):
+    db = sqlite3.connect("users.db")
+    cur = db.cursor()
+
+    cur.execute("SELECT value FROM mytable WHERE user_id = ?", (user_id,))
+    rows = cur.fetchall()
+
+    # Return the data as a list of tuples
+    return [(row[0], row[1]) for row in rows]
+
+def delete_data(user_id):
+    # Open the database
+    db = sqlite3.connect("users.db")
+    cur = db.cursor()
+
+    # Delete the data from the table
+    cur.execute("DELETE FROM mytable WHERE user_id = ?", (user_id,))
+
+    # Commit changes and close the database
+    db.commit()
+    db.close()
+
+def select_all():
+    db = sqlite3.connect("users.db")
+    cur = db.cursor()
+
+    cur.execute("SELECT * from users")
+    return list(cur.fetchall())
 
 #ТИНЬКОФ СЕГМЕНТ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 def get_figi(client, ticker):
@@ -403,6 +463,10 @@ def check_thread_alive(thr):
 
 def main():
     print("** Started **\n")
+    # Подписанные пользователи 
+    # connect_db()
+    # global users
+    # users = select_all()
 
 
     with Client(TOKEN_TINKOFF, target=INVEST_GRPC_API) as client:
